@@ -1,0 +1,9 @@
+include_directories($(PROJECT_SOURCE_DIR)../graph)
+add_library(utils
+bitstream.c
+dataqueue.c
+huffman.c
+MediaConfig.cpp
+pixelconvert.c
+Thread.cpp
+)

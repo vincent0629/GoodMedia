@@ -1,0 +1,650 @@
+#include "MPEGAudioDecoder.h"
+#include "MPEGAudioInfo.h"
+#include <string.h>
+#include <math.h>
+#include <assert.h>
+#include "bitstream.h"
+
+typedef CMPEGAudioDecoder::DECODERPARAM DECODERPARAM;
+
+typedef struct
+{
+	int version;
+	int layer;
+	int bit_rate_index;
+	int sampling_frequency;
+	int mode;
+	int mode_extension;
+} HEADER;
+
+typedef struct
+{
+	int nbal;
+	int nlevels[16];
+} BITALLOCATION;
+
+typedef struct
+{
+	int steps;
+	float C;
+	float D;
+	int grouping;
+	int bitsPerCodeword;
+	int msb;
+} CLASSESOFQUANTIZATION;
+
+static const float scalefactorTable[63] = {
+	2.00000000000000f, 1.58740105196820f, 1.25992104989487f, 1.00000000000000f,
+	0.79370052598410f, 0.62996052494744f, 0.50000000000000f, 0.39685026299205f,
+	0.31498026247372f, 0.25000000000000f, 0.19842513149602f, 0.15749013123686f,
+	0.12500000000000f, 0.09921256574801f, 0.07874506561843f, 0.06250000000000f,
+	0.04960628287401f, 0.03937253280921f, 0.03125000000000f, 0.02480314143700f,
+	0.01968626640461f, 0.01562500000000f, 0.01240157071850f, 0.00984313320230f,
+	0.00781250000000f, 0.00620078535925f, 0.00492156660115f, 0.00390625000000f,
+	0.00310039267963f, 0.00246078330058f, 0.00195312500000f, 0.00155019633981f,
+	0.00123039165029f, 0.00097656250000f, 0.00077509816991f, 0.00061519582514f,
+	0.00048828125000f, 0.00038754908495f, 0.00030759791257f, 0.00024414062500f,
+	0.00019377454248f, 0.00015379895629f, 0.00012207031250f, 0.00009688727124f,
+	0.00007689947814f, 0.00006103515625f, 0.00004844363562f, 0.00003844973907f,
+	0.00003051757813f, 0.00002422181781f, 0.00001922486954f, 0.00001525878906f,
+	0.00001211090890f, 0.00000961243477f, 0.00000762939453f, 0.00000605545445f,
+	0.00000480621738f, 0.00000381469727f, 0.00000302772723f, 0.00000240310869f,
+	0.00000190734863f, 0.00000151386361f, 0.00000120155435f
+};
+
+static const float D[512] = {  //coefficients of the synthesis window
+	 0.000000000f, -0.000015259f, -0.000015259f, -0.000015259f,
+	-0.000015259f, -0.000015259f, -0.000015259f, -0.000030518f,
+	-0.000030518f, -0.000030518f, -0.000030518f, -0.000045776f,
+	-0.000045776f, -0.000061035f, -0.000061035f, -0.000076294f,
+	-0.000076294f, -0.000091553f, -0.000106812f, -0.000106812f,
+	-0.000122070f, -0.000137329f, -0.000152588f, -0.000167847f,
+	-0.000198364f, -0.000213623f, -0.000244141f, -0.000259399f,
+	-0.000289917f, -0.000320435f, -0.000366211f, -0.000396729f,
+	-0.000442505f, -0.000473022f, -0.000534058f, -0.000579834f,
+	-0.000625610f, -0.000686646f, -0.000747681f, -0.000808716f,
+	-0.000885010f, -0.000961304f, -0.001037598f, -0.001113892f,
+	-0.001205444f, -0.001296997f, -0.001388550f, -0.001480103f,
+	-0.001586914f, -0.001693726f, -0.001785278f, -0.001907349f,
+	-0.002014160f, -0.002120972f, -0.002243042f, -0.002349854f,
+	-0.002456665f, -0.002578735f, -0.002685547f, -0.002792358f,
+	-0.002899170f, -0.002990723f, -0.003082275f, -0.003173828f,
+	 0.003250122f,  0.003326416f,  0.003387451f,  0.003433228f,
+	 0.003463745f,  0.003479004f,  0.003479004f,  0.003463745f,
+	 0.003417969f,  0.003372192f,  0.003280640f,  0.003173828f,
+	 0.003051758f,  0.002883911f,  0.002700806f,  0.002487183f,
+	 0.002227783f,  0.001937866f,  0.001617432f,  0.001266479f,
+	 0.000869751f,  0.000442505f, -0.000030518f, -0.000549316f,
+	-0.001098633f, -0.001693726f, -0.002334595f, -0.003005981f,
+	-0.003723145f, -0.004486084f, -0.005294800f, -0.006118774f,
+	-0.007003784f, -0.007919312f, -0.008865356f, -0.009841919f,
+	-0.010848999f, -0.011886597f, -0.012939453f, -0.014022827f,
+	-0.015121460f, -0.016235352f, -0.017349243f, -0.018463135f,
+	-0.019577026f, -0.020690918f, -0.021789551f, -0.022857666f,
+	-0.023910522f, -0.024932861f, -0.025909424f, -0.026840210f,
+	-0.027725220f, -0.028533936f, -0.029281616f, -0.029937744f,
+	-0.030532837f, -0.031005859f, -0.031387329f, -0.031661987f,
+	-0.031814575f, -0.031845093f, -0.031738281f, -0.031478882f,
+	 0.031082153f,  0.030517578f,  0.029785156f,  0.028884888f,
+	 0.027801514f,  0.026535034f,  0.025085449f,  0.023422241f,
+	 0.021575928f,  0.019531250f,  0.017257690f,  0.014801025f,
+	 0.012115479f,  0.009231567f,  0.006134033f,  0.002822876f,
+	-0.000686646f, -0.004394531f, -0.008316040f, -0.012420654f,
+	-0.016708374f, -0.021179199f, -0.025817871f, -0.030609131f,
+	-0.035552979f, -0.040634155f, -0.045837402f, -0.051132202f,
+	-0.056533813f, -0.061996460f, -0.067520142f, -0.073059082f,
+	-0.078628540f, -0.084182739f, -0.089706421f, -0.095169067f,
+	-0.100540161f, -0.105819702f, -0.110946655f, -0.115921021f,
+	-0.120697021f, -0.125259399f, -0.129562378f, -0.133590698f,
+	-0.137298584f, -0.140670776f, -0.143676758f, -0.146255493f,
+	-0.148422241f, -0.150115967f, -0.151306152f, -0.151962280f,
+	-0.152069092f, -0.151596069f, -0.150497437f, -0.148773193f,
+	-0.146362305f, -0.143264771f, -0.139450073f, -0.134887695f,
+	-0.129577637f, -0.123474121f, -0.116577148f, -0.108856201f,
+	 0.100311279f,  0.090927124f,  0.080688477f,  0.069595337f,
+	 0.057617187f,  0.044784546f,  0.031082153f,  0.016510010f,
+	 0.001068115f, -0.015228271f, -0.032379150f, -0.050354004f,
+	-0.069168091f, -0.088775635f, -0.109161377f, -0.130310059f,
+	-0.152206421f, -0.174789429f, -0.198059082f, -0.221984863f,
+	-0.246505737f, -0.271591187f, -0.297210693f, -0.323318481f,
+	-0.349868774f, -0.376800537f, -0.404083252f, -0.431655884f,
+	-0.459472656f, -0.487472534f, -0.515609741f, -0.543823242f,
+	-0.572036743f, -0.600219727f, -0.628295898f, -0.656219482f,
+	-0.683914185f, -0.711318970f, -0.738372803f, -0.765029907f,
+	-0.791213989f, -0.816864014f, -0.841949463f, -0.866363525f,
+	-0.890090942f, -0.913055420f, -0.935195923f, -0.956481934f,
+	-0.976852417f, -0.996246338f, -1.014617920f, -1.031936646f,
+	-1.048156738f, -1.063217163f, -1.077117920f, -1.089782715f,
+	-1.101211548f, -1.111373901f, -1.120223999f, -1.127746582f,
+	-1.133926392f, -1.138763428f, -1.142211914f, -1.144287109f,
+	 1.144989014f,  1.144287109f,  1.142211914f,  1.138763428f,
+	 1.133926392f,  1.127746582f,  1.120223999f,  1.111373901f,
+	 1.101211548f,  1.089782715f,  1.077117920f,  1.063217163f,
+	 1.048156738f,  1.031936646f,  1.014617920f,  0.996246338f,
+	 0.976852417f,  0.956481934f,  0.935195923f,  0.913055420f,
+	 0.890090942f,  0.866363525f,  0.841949463f,  0.816864014f,
+	 0.791213989f,  0.765029907f,  0.738372803f,  0.711318970f,
+	 0.683914185f,  0.656219482f,  0.628295898f,  0.600219727f,
+	 0.572036743f,  0.543823242f,  0.515609741f,  0.487472534f,
+	 0.459472656f,  0.431655884f,  0.404083252f,  0.376800537f,
+	 0.349868774f,  0.323318481f,  0.297210693f,  0.271591187f,
+	 0.246505737f,  0.221984863f,  0.198059082f,  0.174789429f,
+	 0.152206421f,  0.130310059f,  0.109161377f,  0.088775635f,
+	 0.069168091f,  0.050354004f,  0.032379150f,  0.015228271f,
+	-0.001068115f, -0.016510010f, -0.031082153f, -0.044784546f,
+	-0.057617187f, -0.069595337f, -0.080688477f, -0.090927124f,
+	 0.100311279f,  0.108856201f,  0.116577148f,  0.123474121f,
+	 0.129577637f,  0.134887695f,  0.139450073f,  0.143264771f,
+	 0.146362305f,  0.148773193f,  0.150497437f,  0.151596069f,
+	 0.152069092f,  0.151962280f,  0.151306152f,  0.150115967f,
+	 0.148422241f,  0.146255493f,  0.143676758f,  0.140670776f,
+	 0.137298584f,  0.133590698f,  0.129562378f,  0.125259399f,
+	 0.120697021f,  0.115921021f,  0.110946655f,  0.105819702f,
+	 0.100540161f,  0.095169067f,  0.089706421f,  0.084182739f,
+	 0.078628540f,  0.073059082f,  0.067520142f,  0.061996460f,
+	 0.056533813f,  0.051132202f,  0.045837402f,  0.040634155f,
+	 0.035552979f,  0.030609131f,  0.025817871f,  0.021179199f,
+	 0.016708374f,  0.012420654f,  0.008316040f,  0.004394531f,
+	 0.000686646f, -0.002822876f, -0.006134033f, -0.009231567f,
+	-0.012115479f, -0.014801025f, -0.017257690f, -0.019531250f,
+	-0.021575928f, -0.023422241f, -0.025085449f, -0.026535034f,
+	-0.027801514f, -0.028884888f, -0.029785156f, -0.030517578f,
+	 0.031082153f,  0.031478882f,  0.031738281f,  0.031845093f,
+	 0.031814575f,  0.031661987f,  0.031387329f,  0.031005859f,
+	 0.030532837f,  0.029937744f,  0.029281616f,  0.028533936f,
+	 0.027725220f,  0.026840210f,  0.025909424f,  0.024932861f,
+	 0.023910522f,  0.022857666f,  0.021789551f,  0.020690918f,
+	 0.019577026f,  0.018463135f,  0.017349243f,  0.016235352f,
+	 0.015121460f,  0.014022827f,  0.012939453f,  0.011886597f,
+	 0.010848999f,  0.009841919f,  0.008865356f,  0.007919312f,
+	 0.007003784f,  0.006118774f,  0.005294800f,  0.004486084f,
+	 0.003723145f,  0.003005981f,  0.002334595f,  0.001693726f,
+	 0.001098633f,  0.000549316f,  0.000030518f, -0.000442505f,
+	-0.000869751f, -0.001266479f, -0.001617432f, -0.001937866f,
+	-0.002227783f, -0.002487183f, -0.002700806f, -0.002883911f,
+	-0.003051758f, -0.003173828f, -0.003280640f, -0.003372192f,
+	-0.003417969f, -0.003463745f, -0.003479004f, -0.003479004f,
+	-0.003463745f, -0.003433228f, -0.003387451f, -0.003326416f,
+	 0.003250122f,  0.003173828f,  0.003082275f,  0.002990723f,
+	 0.002899170f,  0.002792358f,  0.002685547f,  0.002578735f,
+	 0.002456665f,  0.002349854f,  0.002243042f,  0.002120972f,
+	 0.002014160f,  0.001907349f,  0.001785278f,  0.001693726f,
+	 0.001586914f,  0.001480103f,  0.001388550f,  0.001296997f,
+	 0.001205444f,  0.001113892f,  0.001037598f,  0.000961304f,
+	 0.000885010f,  0.000808716f,  0.000747681f,  0.000686646f,
+	 0.000625610f,  0.000579834f,  0.000534058f,  0.000473022f,
+	 0.000442505f,  0.000396729f,  0.000366211f,  0.000320435f,
+	 0.000289917f,  0.000259399f,  0.000244141f,  0.000213623f,
+	 0.000198364f,  0.000167847f,  0.000152588f,  0.000137329f,
+	 0.000122070f,  0.000106812f,  0.000106812f,  0.000091553f,
+	 0.000076294f,  0.000076294f,  0.000061035f,  0.000061035f,
+	 0.000045776f,  0.000045776f,  0.000030518f,  0.000030518f,
+	 0.000030518f,  0.000030518f,  0.000015259f,  0.000015259f,
+	 0.000015259f,  0.000015259f,  0.000015259f,  0.000015259f
+};
+
+static float N[64][32];
+
+static void initDecoder(DECODERPARAM *param)
+{
+	int i, k;
+	double PI64;
+
+	PI64 = 3.14159265358979 / 64.0;
+	for (i = 0; i < 64; i++)
+		for (k = 0; k < 32; k++)
+			N[i][k] = cos((16 + i) * (2 * k + 1) * PI64);
+	for (i = 0; i < 2; i++)
+		for (k = 0; k < 1024; k++)
+			param->V[i][k] = 0.0f;
+}
+
+static void synthesis(float *sbsamples, float *v, int nChannel, short *pPCM)
+{
+	int i, j;
+	float sum, u[512];
+
+	for (i = 1023; i >= 64; i--)  //shifting
+		v[i] = v[i - 64];
+	for (i = 0; i < 64; i++)  //matrixing
+	{
+		sum = 0.0f;
+		for (j = 0; j < 32; j++)
+			sum += N[i][j] * sbsamples[j];
+		v[i] = sum;
+	}
+	for (i = 0; i < 8; i++)  //build a 512 values vector u
+		for (j = 0; j < 32; j++)
+		{
+			u[i * 64 + j] = v[i * 128 + j];
+			u[i * 64 + 32 + j] = v[i * 128 + 96 + j];
+		}
+	for (i = 0; i < 512; i++)  //window by 512 coefficients
+		u[i] *= D[i];
+	for (j = 0; j < 32; j++)  //calculate 32 samples
+	{
+		sum = 0.0f;
+		for (i = 0; i < 16; i++)
+			sum += u[j + 32 * i];
+		if (sum > 1.0f)
+			sum = 1.0f;
+		else if (sum < -1.0f)
+			sum = -1.0f;
+		pPCM[j * nChannel] = (short)(sum * 32767.0f);
+	}
+}
+
+static void decode1(BITSTREAM *stream, HEADER *header, DECODERPARAM *param, short *pPCM)
+{
+	int nChannel;
+	int gr, sb, ch, nb;
+	int allocation[2][32], scalefactor[2][32], sample;
+	float fraction, sbsamples[2][32];
+	int bound;
+
+	nChannel = header->mode == 3? 1 : 2;
+	if (header->mode != 1)  //stereo/dual_channel/single_channel
+	{
+		for (sb = 0; sb < 32; sb++)  //bit allocation decoding
+			for (ch = 0; ch < nChannel; ch++)
+				allocation[ch][sb] = bsread(stream, 4);
+	}
+	else  //intensity_stereo
+	{
+		bound = (header->mode_extension + 1) * 4;  //bound
+		for (sb = 0; sb < bound; sb++)  //bit allocation decoding
+			for (ch = 0; ch < 2; ch++)
+				allocation[ch][sb] = bsread(stream, 4);
+		for (sb = bound; sb < 32; sb++)  //bit allocation decoding
+			allocation[0][sb] = allocation[1][sb] = bsread(stream, 4);
+	}
+	for (sb = 0; sb < 32; sb++)  //scalefactor decoding
+		for (ch = 0; ch < nChannel; ch++)
+			if (allocation[ch][sb] != 0)
+				scalefactor[ch][sb] = bsread(stream, 6);
+	for (gr = 0; gr < 12; gr++)
+	{
+		for (sb = 0; sb < 32; sb++)  //requantization of subband samples
+			for (ch = 0; ch < nChannel; ch++)
+			{
+				nb = allocation[ch][sb];
+				if (nb != 0)
+				{
+					++nb;
+					sample = bsread(stream, nb);
+					fraction = ((sample >> (nb - 1)) & 1) == 1? 0.0f : -1.0f;
+					fraction += (float)(sample & ((1 << (nb - 1)) - 1)) / (1 << (nb - 1));
+					fraction = (fraction + 1.0f / (1 << (nb - 1))) * (1 << nb) / ((1 << nb) - 1);
+					sbsamples[ch][sb] = fraction * scalefactorTable[scalefactor[ch][sb]];
+				}
+				else
+					sbsamples[ch][sb] = 0.0f;
+			}
+
+		for (ch = 0; ch < nChannel; ch++)
+			synthesis(sbsamples[ch], param->V[ch], nChannel, pPCM + ch);  //synthesis subband filter
+		pPCM += 32 * nChannel;
+	}  //for
+}
+
+static void decode2(BITSTREAM *stream, HEADER *header, DECODERPARAM *param, short *pPCM)
+{
+	static int bitRateTable[16] = {0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384};
+	static BITALLOCATION bitAllocationTable[8] = {
+		{4, {-1, 0, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+		{4, {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16}},
+		{3, {-1, 0, 1, 2, 3, 4, 5, 16, -1, -1, -1, -1, -1, -1, -1, -1}},
+		{2, {-1, 0, 1, 16, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}},
+		{4, {-1, 0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}},
+		{3, {-1, 0, 1, 3, 4, 5, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1}},
+		{4, {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}},
+		{2, {-1, 0, 1, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}}
+	};
+	static int bitAllocationIndex[72] = {
+		0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3,
+		4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+		6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+	};
+	static CLASSESOFQUANTIZATION classesOfQuantizationTable[17] = {
+		{    3,     4.0f /     3.0f, 1.0f /     2.0f, 1,  5,  2},
+		{    5,     8.0f /     5.0f, 1.0f /     2.0f, 1,  7,  3},
+		{    7,     8.0f /     7.0f, 1.0f /     4.0f, 0,  3,  3},
+		{    9,    16.0f /     9.0f, 1.0f /     2.0f, 1, 10,  4},
+		{   15,    16.0f /    15.0f, 1.0f /     8.0f, 0,  4,  4},
+		{   31,    32.0f /    31.0f, 1.0f /    16.0f, 0,  5,  5},
+		{   63,    64.0f /    63.0f, 1.0f /    32.0f, 0,  6,  6},
+		{  127,   128.0f /   127.0f, 1.0f /    64.0f, 0,  7,  7},
+		{  255,   256.0f /   255.0f, 1.0f /   128.0f, 0,  8,  8},
+		{  511,   512.0f /   511.0f, 1.0f /   256.0f, 0,  9,  9},
+		{ 1023,  1024.0f /  1023.0f, 1.0f /   512.0f, 0, 10, 10},
+		{ 2047,  2048.0f /  2047.0f, 1.0f /  1024.0f, 0, 11, 11},
+		{ 4095,  4096.0f /  4095.0f, 1.0f /  2048.0f, 0, 12, 12},
+		{ 8191,  8192.0f /  8191.0f, 1.0f /  4096.0f, 0, 13, 13},
+		{16383, 16384.0f / 16383.0f, 1.0f /  8192.0f, 0, 14, 14},
+		{32767, 32768.0f / 32767.0f, 1.0f / 16384.0f, 0, 15, 15},
+		{65535, 65536.0f / 65535.0f, 1.0f / 32768.0f, 0, 16, 16}
+	};
+	int nChannel, nBitRatePerChannel;
+	int sblimit, sb, ch, gr, s, nlevel, nb, samplecode;
+	int allocation[2][32], scfsi[2][32], scalefactor[2][32][3], sample[3];
+	int *baIndex;
+	CLASSESOFQUANTIZATION *quantization;
+	float fraction, sbsamples[3][2][32];
+	int bound;
+
+	nChannel = header->mode == 3? 1 : 2;
+	sblimit = 0;
+	baIndex = NULL;
+	if (header->version == 1)
+	{
+		nBitRatePerChannel = bitRateTable[header->bit_rate_index] / nChannel;
+		if (header->sampling_frequency == 1)  //48 kHz
+		{
+			if (nBitRatePerChannel >= 56 && nBitRatePerChannel <= 192)
+			{
+				sblimit = 27;
+				baIndex = bitAllocationIndex;
+			}
+			else if (nBitRatePerChannel >= 32 && nBitRatePerChannel <= 48)
+			{
+				sblimit = 8;
+				baIndex = bitAllocationIndex + 30;
+			}
+		}
+		else  //44.1 kHz or 32 kHz
+		{
+			if (nBitRatePerChannel >= 56 && nBitRatePerChannel <= 80)
+			{
+				sblimit = 27;
+				baIndex = bitAllocationIndex;
+			}
+			else if (nBitRatePerChannel >= 96 && nBitRatePerChannel <= 192)
+			{
+				sblimit = 30;
+				baIndex = bitAllocationIndex;
+			}
+			else if (nBitRatePerChannel >= 32 && nBitRatePerChannel <= 48)
+			{
+				sblimit = header->sampling_frequency == 0? 8 : 12;
+				baIndex = bitAllocationIndex + 30;
+			}
+		}
+	}
+	else  //version 2
+	{
+		sblimit = 30;
+		baIndex = bitAllocationIndex + 42;
+	}
+	assert(sblimit != 0);
+
+	if (header->mode != 1)  //stereo/dual_channel/single_channel
+	{
+		for (sb = 0; sb < sblimit; sb++)  //bit allocation decoding
+			for (ch = 0; ch < nChannel; ch++)
+				allocation[ch][sb] = bsread(stream, bitAllocationTable[baIndex[sb]].nbal);
+	}
+	else  //intensity_stereo
+	{
+		bound = (header->mode_extension + 1) * 4;  //bound
+		for (sb = 0; sb < bound; sb++)  //bit allocation decoding
+			for (ch = 0; ch < 2; ch++)
+				allocation[ch][sb] = bsread(stream, bitAllocationTable[baIndex[sb]].nbal);
+		for (sb = bound; sb < sblimit; sb++)  //bit allocation decoding
+			allocation[0][sb] = allocation[1][sb] = bsread(stream, bitAllocationTable[baIndex[sb]].nbal);
+	}
+	for (sb = sblimit; sb < 32; sb++)
+		for (ch = 0; ch < nChannel; ch++)
+			allocation[ch][sb] = 0;
+	for (sb = 0; sb < sblimit; sb++)  //scalefactor selection information decoding
+		for (ch = 0; ch < nChannel; ch++)
+			if (allocation[ch][sb] != 0)
+				scfsi[ch][sb] = bsread(stream, 2);
+	for (sb = 0; sb < sblimit; sb++)  //scalefactor decoding
+		for (ch = 0; ch < nChannel; ch++)
+			if (allocation[ch][sb] != 0)
+			{
+				scalefactor[ch][sb][0] = bsread(stream, 6);
+				if (scfsi[ch][sb] == 0)
+				{
+					scalefactor[ch][sb][1] = bsread(stream, 6);
+					scalefactor[ch][sb][2] = bsread(stream, 6);
+				}
+				else if (scfsi[ch][sb] == 1)
+				{
+					scalefactor[ch][sb][1] = scalefactor[ch][sb][0];
+					scalefactor[ch][sb][2] = bsread(stream, 6);
+				}
+				else if (scfsi[ch][sb] == 2)
+				{
+					scalefactor[ch][sb][1] = scalefactor[ch][sb][0];
+					scalefactor[ch][sb][2] = scalefactor[ch][sb][0];
+				}
+				else
+				{
+					scalefactor[ch][sb][1] = bsread(stream, 6);
+					scalefactor[ch][sb][2] = scalefactor[ch][sb][1];
+				}
+			}
+	for (gr = 0; gr < 12; gr++)
+	{
+		for (sb = 0; sb < 32; sb++)  //requantization of subband samples
+			for (ch = 0; ch < nChannel; ch++)
+				if (allocation[ch][sb] != 0)
+				{
+					nlevel = bitAllocationTable[baIndex[sb]].nlevels[allocation[ch][sb]];
+					quantization = classesOfQuantizationTable + nlevel;
+					nb = quantization->bitsPerCodeword;
+					if (quantization->grouping == 1)
+					{
+						samplecode = bsread(stream, nb);
+						for (s = 0; s < 3; s++)
+						{
+							sample[s] = samplecode % quantization->steps;
+							samplecode /= quantization->steps;
+						}
+					}
+					else
+						for (s = 0; s < 3; s++)
+							sample[s] = bsread(stream, nb);
+					nb = quantization->msb;
+					for (s = 0; s < 3; s++)
+					{
+						fraction = ((sample[s] >> (nb - 1)) & 1) == 1? 0.0f : -1.0f;
+						fraction += (float)(sample[s] & ((1 << (nb - 1)) - 1)) / (1 << (nb - 1));
+						fraction = (fraction + quantization->D) * quantization->C;  //requantize
+						sbsamples[s][ch][sb] = fraction * scalefactorTable[scalefactor[ch][sb][gr >> 2]];  //rescale
+					}
+				}
+				else
+					for (s = 0; s < 3; s++)
+						sbsamples[s][ch][sb] = 0.0f;
+
+		for (s = 0; s < 3; s++)
+		{
+			for (ch = 0; ch < nChannel; ch++)
+				synthesis(sbsamples[s][ch], param->V[ch], nChannel, pPCM + ch);  //synthesis subband filter
+			pPCM += 32 * nChannel;
+		}
+	}  //for
+}
+
+static void decode3(BITSTREAM *stream, HEADER *header, DECODERPARAM *param, short *pPCM)
+{
+	memset(pPCM, 0, (header->version == 2? 576 : 1152) * (header->mode == 3? 1 : 2) * sizeof(short));
+	/*
+	nChannel = mode == 3? 1 : 2;
+	nValue = bsread(stream, 9);  //main data end
+	nValue = bsread(stream, 3);  //private bits
+	for (ch = 0; ch < nChannel; ch++)
+		for (scfsi_band = 0; scfsi_band < 4; scfsi_band++)
+			scfsi[scfsi_band][ch] = bsread(stream, 1);
+	for (gr = 0; gr < 2; gr++)
+		for (ch = 0; ch < nChannel; ch++)
+		{
+			part2_3_length[gr][ch] = bsread(stream, 12);
+			big_values[gr][ch] = bsread(stream, 9);
+			global_gain[gr][ch] = bsread(stream, 8);
+			scalefac_compress[gr][ch] = bsread(stream, 4);
+			blocksplit_flag[gr][ch] = bsread(stream, 1);
+			if (blocksplit_flag[gr][ch])
+			{
+				block_type[gr][ch] = bsread(stream, 2);
+				switch_point[gr][ch] = bsread(stream, 1);
+				for (region = 0; region < 2; region++)
+					table_select[region][gr][ch] = bsread(stream, 5);
+				for (window = 0; window < 3; window++)
+					subblock_gain[window][gr][ch] = bsread(stream, 3);
+			}
+			else
+			{
+				for (region = 0; region < 3; region++)
+					table_select[region][gr][ch] = bsread(stream, 5);
+				region_address1[gr][ch] = bsread(stream, 4);
+				region_address2[gr][ch] = bsread(stream, 3);
+			}
+			preflag[gr][ch] = bsread(stream, 1);
+			scalefac_scale[gr][ch] = bsread(stream, 1);
+			count1table_select[gr][ch] = bsread(stream, 1);
+		}
+
+	for (gr = 0; gr < 2; gr++)
+		for (ch = 0; ch < nChannel; ch++)
+		{
+			if (blocksplit_flag[gr][ch] == 1 && block_type[gr][ch] == 2)
+			{
+				for (cb = 0; cb < switch_point_l[gr][ch]; cb++)
+					if (scfsi[cb] == 0 || gr == 0)
+						scalefac[cb][gr][ch] = bsread(stream, 
+				for (cb = switch_point_s[gr][ch]; cb < cblimit_short; cb++)
+					for (window = 0; window < 3; window++)
+						if (scfsi[cb] == 0 || gr == 0)
+							scalefac[cb][window][gr][ch] = bsread(stream, 
+			}
+			else
+				for (cb = 0; cb < cblimit; cb++)
+					if (scfsi[cb] == 0 || gr == 0)
+						scalefac[cb][gr][ch] = bsread(stream, 
+			Huffman_code_bits = bsread(stream, part2_3_length[gr][ch] - part2_length);
+		}
+	*/
+}
+
+CMPEGAudioDecoder::CMPEGAudioDecoder()
+{
+}
+
+CMPEGAudioDecoder::~CMPEGAudioDecoder()
+{
+}
+
+bool CMPEGAudioDecoder::SetInputInfo(MediaType type, MediaInfo *pInfo)
+{
+	MPEGAudioInfo *pMPEGAudioInfo;
+
+	if (pInfo->nSize < sizeof(MPEGAudioInfo))
+		return false;
+
+	pMPEGAudioInfo = (MPEGAudioInfo *)pInfo;
+	if (pMPEGAudioInfo->nVersion == 0 || pMPEGAudioInfo->nLayer == 3)  //not support version 2.5 and layer 3
+		return false;
+
+	m_nSampleRate = pMPEGAudioInfo->nSampleRate;
+	m_nChannel = pMPEGAudioInfo->nChannel;
+	initDecoder(&m_Param);
+	return true;
+}
+
+bool CMPEGAudioDecoder::GetOutputInfo(MediaInfo *pInfo)
+{
+	AudioRenderInfo *pAudioInfo;
+
+	if (pInfo->nSize < sizeof(AudioRenderInfo))
+		return false;
+
+	pAudioInfo = (AudioRenderInfo *)pInfo;
+	pAudioInfo->nSize = sizeof(AudioRenderInfo);
+	pAudioInfo->nSampleRate = m_nSampleRate;
+	pAudioInfo->nBitsPerSample = sizeof(short) << 3;
+	pAudioInfo->nChannel = m_nChannel;
+	return true;
+}
+
+int CMPEGAudioDecoder::GetInputSize(void)
+{
+	return 4096;
+}
+
+int CMPEGAudioDecoder::GetOutputSize(void)
+{
+	return 1152 * sizeof(short) * 2;
+}
+
+int CMPEGAudioDecoder::Decode(unsigned char *pInData, int nInSize, void *pOutData)
+{
+	static int versionTable[] = {0, -1, 2, 1};  //2.5, reserved, 2, 1
+	BITSTREAM *stream;
+	HEADER header;
+	int layer, protection_bit, padding_bit;
+	int nValue, nSamples;
+
+	m_Param.pInData = pInData;
+	m_Param.nInSize = nInSize;
+	stream = bsopen(ReadByte, (int)&m_Param);
+	//header
+	nValue = bsread(stream, 11);  //syncword
+	header.version = versionTable[bsread(stream, 2)];
+	layer = 4 - bsread(stream, 2);
+	protection_bit = bsread(stream, 1);
+	header.bit_rate_index = bsread(stream, 4);
+	header.sampling_frequency = bsread(stream, 2);
+	padding_bit = bsread(stream, 1);
+	nValue = bsread(stream, 1);  //private bit
+	header.mode = bsread(stream, 2);
+	header.mode_extension = bsread(stream, 2);
+	nValue = bsread(stream, 1);  //copyright
+	nValue = bsread(stream, 1);  //original/home
+	nValue = bsread(stream, 2);  //emphasis
+	//error_check
+	if (protection_bit == 0)
+		nValue = bsread(stream, 16);  //crc check
+	//audio_data
+	if (layer == 1)
+	{
+		decode1(stream, &header, &m_Param, (short *)pOutData);
+		nSamples = 384;
+	}
+	else if (layer == 2)
+	{
+		decode2(stream, &header, &m_Param, (short *)pOutData);
+		nSamples = 1152;
+	}
+	else if (layer == 3)
+	{
+		decode3(stream, &header, &m_Param, (short *)pOutData);
+		nSamples = header.version == 2? 576 : 1152;
+	}
+	bsclose(stream);
+
+	return nSamples * (header.mode == 3? 1 : 2) * sizeof(short);
+}
+
+void CMPEGAudioDecoder::Flush(void)
+{
+	int i, k;
+
+	for (i = 0; i < 2; i++)
+		for (k = 0; k < 1024; k++)
+			m_Param.V[i][k] = 0.0f;
+}
+
+int CMPEGAudioDecoder::ReadByte(int nData)
+{
+	DECODERPARAM *pParam;
+
+	pParam = (DECODERPARAM *)nData;
+	if (pParam->nInSize == 0)
+		return -1;
+
+	--pParam->nInSize;
+	return *(pParam->pInData)++;
+}

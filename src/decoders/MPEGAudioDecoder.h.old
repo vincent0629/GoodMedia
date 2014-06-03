@@ -1,0 +1,32 @@
+#ifndef _MPEGAUDIODECODER_H_
+#define _MPEGAUDIODECODER_H_
+
+#include "MediaDecoder.h"
+
+class CMPEGAudioDecoder : public CMediaDecoder
+{
+public:
+	typedef struct
+	{
+		unsigned char *pInData;
+		int nInSize;
+		float V[2][1024];
+	} DECODERPARAM;
+public:
+	CMPEGAudioDecoder();
+	~CMPEGAudioDecoder();
+	bool SetInputInfo(MediaType type, MediaInfo *pInfo);
+	bool GetOutputInfo(MediaInfo *pInfo);
+	int GetInputSize(void);
+	int GetOutputSize(void);
+	int Decode(unsigned char *pInData, int nInSize, void *pOutData);
+	void Flush(void);
+private:
+	int m_nSampleRate;
+	int m_nChannel;
+	DECODERPARAM m_Param;
+
+	static int ReadByte(int nData);
+};
+
+#endif
