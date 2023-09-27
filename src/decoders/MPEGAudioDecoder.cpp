@@ -201,7 +201,7 @@ static const short scalefactorTable[63] = {  //2^13
 	 0.000030518f,  0.000030518f,  0.000015259f,  0.000015259f,
 	 0.000015259f,  0.000015259f,  0.000015259f,  0.000015259f
 };*/
-static const short D[512] = {  //coefficients of the synthesis window  //2^13
+static const unsigned short D[512] = {  //coefficients of the synthesis window  //2^13
 	0x0000, 0x0000, 0x0000, 0x0000,
 	0x0000, 0x0000, 0x0000, 0x0000,
 	0x0000, 0x0000, 0x0000, 0x0000,
@@ -383,7 +383,7 @@ static void synthesis(short *sbsamples, short *v, int nChannel, short *pPCM)
 			sum += MULT_SS(sbsamples[j], N[i][j]);
 		v[i] = sum;
 	}
-	for (j = 0, pd = D; j < 32; ++j, ++pd, ++v)  //calculate 32 samples
+	for (j = 0, pd = (const short*)D; j < 32; ++j, ++pd, ++v)  //calculate 32 samples
 	{
 		sum = 0;
 		for (i = 0; i < 8 * 64; i += 64)  //window by 512 coefficients
